@@ -1,0 +1,19 @@
+{
+  "seed": 42,
+  "validation_fraction": 0.2,
+  "tfidf": {
+    "analyzer": "char",
+    "ngram_range": [3, 5],
+    "lowercase": false,
+    "min_df": 2,
+    "max_features": 40000,
+    "sublinear_tf": true
+  },
+  "logistic_regression": {
+    "C": 1.0,
+    "solver": "lbfgs",
+    "max_iter": 400,
+    "tol": 0.000001,
+    "class_weight": "balanced"
+  }
+}
