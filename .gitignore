@@ -32,3 +32,9 @@ __pycache__/
 # Retain unsuccessful inspection outputs locally for audit only.
 /reports/name_that_llm_data_inventory.csv
 /reports/name_that_llm_data_statistics.json
+
+# Local baseline environments, fitted models, and row-level predictions.
+/artifacts/
+/outputs/
+*.joblib
+.ipynb_checkpoints/
