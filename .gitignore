@@ -1,0 +1,34 @@
+# Original competition data stays local.
+/train.csv
+/test.csv
+/sample_submission.parquet
+/data/
+/datasets/
+
+# Credentials and local configuration.
+.env
+.env.*
+!.env.example
+kaggle.json
+.aws/
+.codex/
+.agents/
+
+# IDE, Python environments, caches, and model artifacts.
+.vs/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+/models/
+/weights/
+
+# Retain unsuccessful inspection outputs locally for audit only.
+/reports/name_that_llm_data_inventory.csv
+/reports/name_that_llm_data_statistics.json

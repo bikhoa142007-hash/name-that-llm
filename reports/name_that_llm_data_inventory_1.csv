@@ -1,0 +1,4 @@
+﻿file,source_role,bytes,sha256,rows,columns,notes
+C:\Users\Khoa Bi\VS Studio\repos\name-that-llm\sample_submission.parquet,local; provenance unverified; format example; not ground truth,899,ccf86796b80fd7f83d8463664603fd1208e17559abcf416f198776b819646188,3,2,full file read
+C:\Users\Khoa Bi\VS Studio\repos\name-that-llm\test.csv,local; provenance unverified; public test candidate,2218,4545aa3a3459f4c0724f97ad5bd06c4caa3506bdfea5fab905e8203184fc0c57,3,2,full file read
+C:\Users\Khoa Bi\VS Studio\repos\name-that-llm\train.csv,local; provenance unverified; labeled training candidate,2139418,40a22ce8d88c5f46feb4637a099db815bef5f713ffe53e89dbe1b7b21de77707,2699,4,full file read
