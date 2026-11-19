@@ -17,13 +17,15 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.optimize import linear_sum_assignment
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.dummy import DummyClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              classification_report, confusion_matrix, f1_score)
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
 
@@ -106,7 +108,7 @@ def read_input(path, labeled=False):
     return frame, audit
 
 
-def make_split(frame, config):
+def connected_groups(frame):
     """Connected components combine prompt groups AND duplicate-text groups.
 
     A duplicate connecting two prompts must keep both entire prompts together.
@@ -132,10 +134,11 @@ def make_split(frame, config):
             else:
                 seen[value] = i
     groups = np.array([find(i) for i in range(len(frame))])
-    require(len(set(groups)) >= 2, 'Not enough independent groups for a holdout.')
-    splitter = GroupShuffleSplit(n_splits=1, test_size=config['validation_fraction'],
-                                random_state=config['seed'])
-    train_idx, valid_idx = next(splitter.split(frame['text'], frame['model'], groups))
+    return groups, keys
+
+
+def check_disjoint(frame, groups, train_idx, valid_idx):
+    """Stop on missing classes or any group/text/prompt overlap between the two sides."""
     a, b = frame.iloc[train_idx], frame.iloc[valid_idx]
     absent = {name: sorted(set(LABELS) - set(part['model'])) for name, part in
               [('train', a), ('validation', b)]}
@@ -145,6 +148,18 @@ def make_split(frame, config):
     normalized_overlap = len(set(a['text'].map(normalized)) & set(b['text'].map(normalized)))
     prompt_overlap = (len(set(a['prompt_id']) & set(b['prompt_id'])) if 'prompt_id' in frame else None)
     require(exact_overlap == normalized_overlap == 0 and prompt_overlap in (0, None), 'Text/prompt leakage detected.')
+    return absent, exact_overlap, normalized_overlap, prompt_overlap
+
+
+def make_split(frame, config):
+    """One grouped holdout over connected prompt/duplicate components."""
+    groups, keys = connected_groups(frame)
+    require(len(set(groups)) >= 2, 'Not enough independent groups for a holdout.')
+    splitter = GroupShuffleSplit(n_splits=1, test_size=config['validation_fraction'],
+                                random_state=config['seed'])
+    train_idx, valid_idx = next(splitter.split(frame['text'], frame['model'], groups))
+    a, b = frame.iloc[train_idx], frame.iloc[valid_idx]
+    absent, exact_overlap, normalized_overlap, prompt_overlap = check_disjoint(frame, groups, train_idx, valid_idx)
     conflicts = frame.assign(key=keys).groupby('key')['model'].nunique()
     audit = {'method': 'GroupShuffleSplit on connected prompt/duplicate components',
              'seed': config['seed'], 'validation_fraction': config['validation_fraction'],
@@ -187,6 +202,45 @@ def score(labels, predictions):
     return {'balanced_accuracy': float(balanced_accuracy_score(labels, predictions)),
             'accuracy': float(accuracy_score(labels, predictions)),
             'macro_f1': float(f1_score(labels, predictions, labels=LABELS, average='macro', zero_division=0))}
+
+
+def _assign_within(log_p, classes, labels):
+    """Each cluster: Hungarian on -log P, class columns repeated ceil(size/K) times."""
+    classes = np.asarray(classes)
+    result = np.empty(len(log_p), dtype=object)
+    for label in np.unique(labels):
+        idx = np.flatnonzero(labels == label)
+        repeats = -(-len(idx) // len(classes))
+        rows, cols = linear_sum_assignment(-np.tile(log_p[idx], (1, repeats)))
+        result[idx[rows]] = classes[cols % len(classes)]
+    return result
+
+
+def assign_by_topic(texts, probabilities, classes):
+    """Optional post-processing (debates/1-huong-cai-tien-mo-hinh.md). Off by default.
+
+    Clusters rows by word topic (k = round(m/K)) and gives each cluster distinct labels.
+    Falls back to argmax for n < K or an empty vocabulary; zero-vector rows keep argmax.
+    Gain shrinks when per-model counts are unequal (debate 1, E9).
+    """
+    classes = np.asarray(classes)
+    result = classes[probabilities.argmax(axis=1)] if len(texts) else np.array([], dtype=object)
+    if len(texts) < len(classes):
+        return result
+    try:
+        x = TfidfVectorizer(analyzer='word', stop_words='english', min_df=2,
+                            sublinear_tf=True).fit_transform(texts)
+    except ValueError:  # empty vocabulary
+        return result
+    usable = np.asarray(x.getnnz(axis=1) > 0)
+    clusters = round(int(usable.sum()) / len(classes))
+    if clusters < 1:
+        return result
+    labels = AgglomerativeClustering(n_clusters=clusters, metric='cosine',
+                                     linkage='average').fit_predict(x[usable].toarray())
+    result = result.astype(object)
+    result[usable] = _assign_within(np.log(np.clip(probabilities[usable], 1e-12, 1)), classes, labels)
+    return result
 
 
 def evaluate_models(frame, train_idx, valid_idx, model, dummy, directory):
@@ -298,14 +352,19 @@ def predict(args):
     require(set(pipeline.classes_) == set(LABELS), 'Artifact lacks official classes.')
     mapping = json.loads((Path(args.artifact_dir) / 'label_mapping.json').read_text(encoding='utf-8'))
     require(mapping['model_classes'] == pipeline.classes_.tolist(), 'Saved class mapping is inconsistent.')
-    predictions = []
+    batches = [np.zeros((0, len(pipeline.classes_)))]
     with threadpool_limits(limits=1):
         for offset in range(0, len(test), args.batch_size):
             probabilities = pipeline.predict_proba(test['text'].iloc[offset:offset + args.batch_size])
             require(np.isfinite(probabilities).all() and (probabilities >= 0).all() and
                     (probabilities <= 1).all() and np.allclose(probabilities.sum(axis=1), 1),
                     'Invalid model probabilities.')
-            predictions.extend(pipeline.classes_[probabilities.argmax(axis=1)].tolist())
+            batches.append(probabilities)
+        probabilities = np.vstack(batches)
+        if args.assignment == 'topic':
+            predictions = assign_by_topic(test['text'].tolist(), probabilities, pipeline.classes_).tolist()
+        else:
+            predictions = pipeline.classes_[probabilities.argmax(axis=1)].tolist()
     result = pd.DataFrame({'id': test['id'].astype('string'), 'model': pd.Series(predictions, dtype='string')})
     # Validate in memory and AGAIN after reading the exported file.
     validate_submission(test, result)
@@ -313,7 +372,7 @@ def predict(args):
     with output.open('xb') as f:
         result.to_parquet(f, index=False, engine='pyarrow')
     checked = validate_submission(test, pd.read_parquet(output))
-    checked.update(input=audit, output_sha256=sha256(output),
+    checked.update(input=audit, assignment=args.assignment, output_sha256=sha256(output),
                    seconds=time.perf_counter() - start,
                    probability_class_order=pipeline.classes_.tolist(),
                    artifact_model_sha256=meta['artifact_sha256']['pipeline.joblib'])
@@ -339,6 +398,52 @@ def evaluate(args):
     print(json.dumps({'metrics': metrics, 'matches_saved_metrics': True}), flush=True)
 
 
+def cross_validate(args):
+    """5-fold grouped CV of the fixed config: argmax vs optional topic assignment. Never reads test."""
+    start = time.perf_counter()
+    config = json.loads(Path(args.config).read_text(encoding='utf-8'))
+    frame, input_audit = read_input(args.train, labeled=True)
+    output = Path(args.output_dir)
+    require(not output.exists(), 'Use a new output directory; existing runs are never overwritten.')
+    groups, _ = connected_groups(frame)
+    n_splits = 5
+    require(len(set(groups)) >= n_splits, f'Need at least {n_splits} independent groups for CV.')
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=config['seed'])
+    folds = []
+    for number, (train_idx, valid_idx) in enumerate(splitter.split(frame['text'], frame['model'], groups), 1):
+        absent, exact_overlap, normalized_overlap, prompt_overlap = check_disjoint(frame, groups, train_idx, valid_idx)
+        train_part, valid = frame.iloc[train_idx], frame.iloc[valid_idx]
+        model = build_pipeline(config)
+        fit_seconds = fit_checked(model, train_part['text'], train_part['model'])
+        with threadpool_limits(limits=1):
+            probabilities = model.predict_proba(valid['text'])
+        argmax = model.classes_[probabilities.argmax(axis=1)]
+        topic = assign_by_topic(valid['text'].tolist(), probabilities, model.classes_)
+        report = classification_report(valid['model'], argmax, labels=LABELS, output_dict=True, zero_division=0)
+        folds.append({'fold': number, 'train_rows': len(train_idx), 'validation_rows': len(valid_idx),
+                      'validation_groups': len(set(groups[valid_idx])), 'absent_classes': absent,
+                      'prompt_overlap': prompt_overlap, 'exact_text_overlap': exact_overlap,
+                      'normalized_text_overlap': normalized_overlap,
+                      'argmax': score(valid['model'], argmax), 'topic': score(valid['model'], topic),
+                      'argmax_recall_per_class': {label: report[label]['recall'] for label in LABELS},
+                      'fit_seconds': fit_seconds})
+        print(json.dumps({k: folds[-1][k] for k in ('fold', 'validation_rows', 'argmax', 'topic')}), flush=True)
+    summary = {}
+    for mode in ('argmax', 'topic'):
+        values = np.array([f[mode]['balanced_accuracy'] for f in folds])
+        summary[mode] = {'balanced_accuracy_mean': float(values.mean()), 'balanced_accuracy_std': float(values.std())}
+    gains = np.array([f['topic']['balanced_accuracy'] - f['argmax']['balanced_accuracy'] for f in folds])
+    summary.update(topic_gain_min=float(gains.min()), topic_gain_mean=float(gains.mean()),
+                   sc3_balanced_folds_pass=bool((gains > 0).all() and gains.mean() >= 0.05))
+    output.mkdir(parents=True)
+    save_json(output / 'cv_metrics.json', {
+        'config': config, 'n_splits': n_splits, 'seed': config['seed'], 'input': input_audit,
+        'environment': environment(), 'folds': folds, 'summary': summary,
+        'seconds': time.perf_counter() - start,
+        'note': 'Balanced folds only; unequal per-model counts reduce topic gain (debate 1, E9).'})
+    print(json.dumps(summary), flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -358,7 +463,14 @@ def main(argv=None):
     p.add_argument('--artifact-dir', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--batch-size', type=int, default=256)
+    p.add_argument('--assignment', choices=['argmax', 'topic'], default='argmax',
+                   help="'topic' = optional per-cluster distinct labels (debate 1); default argmax.")
     p.set_defaults(func=predict)
+    p = commands.add_parser('cv', help='5-fold grouped CV: argmax vs topic assignment; never reads test.')
+    p.add_argument('--train', required=True)
+    p.add_argument('--config', default='configs/baseline.json')
+    p.add_argument('--output-dir', required=True)
+    p.set_defaults(func=cross_validate)
     p = commands.add_parser('validate', help='Independently read and validate an existing Parquet output.')
     p.add_argument('--test', required=True)
     p.add_argument('--submission', required=True)

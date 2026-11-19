@@ -5,9 +5,11 @@ import unittest
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from src.baseline import LABELS, build_pipeline, fit_checked, make_split, read_input, validate_submission
+from src.baseline import (LABELS, assign_by_topic, build_pipeline, fit_checked, main, make_split,
+                          read_input, validate_submission)
 
 
 class BaselineChecks(unittest.TestCase):
@@ -99,6 +101,58 @@ class BaselineChecks(unittest.TestCase):
             path = self.root / f'{n}.parquet'
             output.to_parquet(path, index=False)
             self.assertEqual(validate_submission(test, pd.read_parquet(path))['rows'], n)
+
+    def test_cv_command_on_grouped_fixture(self):
+        rows = [{'id': f'{p}-{k}', 'prompt_id': f'p{p}', 'text': f'fixture {p} model {k}', 'model': label}
+                for p in range(8) for k, label in enumerate(LABELS)]
+        frame = pd.DataFrame(rows)
+        frame.loc[0, 'text'] = 'café duplicate'
+        frame.loc[len(LABELS) + 1, 'text'] = 'café   duplicate'
+        out = self.root / 'cv'
+        main(['cv', '--train', str(self.csv(frame)), '--config', 'configs/baseline.json', '--output-dir', str(out)])
+        result = json.loads((out / 'cv_metrics.json').read_text(encoding='utf-8'))
+        self.assertEqual(len(result['folds']), 5)
+        self.assertEqual(sum(f['validation_rows'] for f in result['folds']), 8 * len(LABELS))
+        for fold in result['folds']:
+            self.assertEqual(fold['absent_classes'], {'train': [], 'validation': []})
+            self.assertEqual((fold['prompt_overlap'], fold['exact_text_overlap'], fold['normalized_text_overlap']), (0, 0, 0))
+            self.assertEqual(set(fold['argmax_recall_per_class']), set(LABELS))
+        self.assertIn('sc3_balanced_folds_pass', result['summary'])
+
+    def test_topic_assignment_falls_back_below_class_count(self):
+        probabilities = np.eye(len(LABELS))[:5]
+        np.testing.assert_array_equal(assign_by_topic(['a'] * 5, probabilities, LABELS), np.array(LABELS[:5]))
+
+    def test_topic_assignment_stopword_only_texts_use_argmax(self):
+        rng = np.random.default_rng(0)
+        probabilities = rng.dirichlet(np.ones(len(LABELS)), size=len(LABELS))
+        expected = np.asarray(LABELS)[probabilities.argmax(axis=1)]
+        np.testing.assert_array_equal(assign_by_topic(['the and'] * len(LABELS), probabilities, LABELS), expected)
+
+    def test_topic_assignment_distinct_labels_per_cluster_and_order_invariant(self):
+        k = len(LABELS)
+
+        def block():
+            p = np.full((k, k), 0.01)
+            np.fill_diagonal(p, 0.83)
+            return p
+        first, second = block(), block()
+        first[0, :2], first[1, :2] = [0.55, 0.29], [0.45, 0.39]  # unique optimum; row 1 argmax differs
+        stop = np.full((1, k), 0.01)
+        stop[0, 0] = 1 - 0.01 * (k - 1)
+        probabilities = np.vstack([stop, first, second])
+        texts = (['the and'] + [f'galaxy nebula orbit telescope item{i}' for i in range(k)]
+                 + [f'recipe flour butter oven dish{i}' for i in range(k)])
+        ids = np.arange(len(texts))
+        result = assign_by_topic(texts, probabilities, LABELS)
+        argmax = np.asarray(LABELS)[probabilities.argmax(axis=1)]
+        self.assertEqual(result[0], argmax[0])
+        self.assertEqual(len(set(result[1:k + 1])), k)
+        self.assertEqual(len(set(result[k + 1:])), k)
+        self.assertEqual(int((result != argmax).sum()), 1)
+        order = ids[::-1]
+        reversed_result = assign_by_topic([texts[i] for i in order], probabilities[order], LABELS)
+        self.assertEqual(dict(zip(order, reversed_result)), dict(zip(ids, result)))
 
 
 if __name__ == '__main__':
