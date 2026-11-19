@@ -1,5 +1,7 @@
 # Baseline CPU — Name That LLM
 
+**Cập nhật 03/11/2026:** đã chạy thành công trên Kaggle CPU, Internet OFF, với bản tự chứa [kaggle_cpu_standalone.ipynb](notebooks/kaggle_cpu_standalone.ipynb), train và inference cùng môi trường Kaggle. Version 1 Save & Run All báo Successful, runtime 61,3 giây. Xem [bằng chứng và kết quả Kaggle](reports/kaggle_cpu_run_2026-11-03.md). Chưa gửi bài chấm điểm. Các phần bên dưới mô tả quy trình local và notebook inference từ artifact ban đầu.
+
 Đã chạy local trên dữ liệu thật: **TF-IDF ký tự + Logistic Regression**, so sánh với DummyClassifier, lưu pipeline và xuất/đọc lại Parquet. Kết quả và giới hạn: [báo cáo baseline](reports/baseline_report.md). Chưa chạy trên Kaggle và chưa gửi submission.
 
 ## Ý nghĩa ngắn gọn
@@ -61,6 +63,20 @@ File đã tạo và kiểm chứng trong phiên này: `outputs/baseline/submissi
 
 Quy tắc lỗi dữ liệu: ID thiếu/trống/trùng hoặc cột thiếu → dừng; train text rỗng/null hoặc thiếu nhãn → dừng; test text null → chuỗi rỗng, test chỉ khoảng trắng được giữ nguyên, có cảnh báo, **không bỏ dòng**. Không tự đoán nhãn. CSV đọc kiểu chuỗi để giữ số 0 đầu ID; ô trống coi là null, chữ `NA` giữ nguyên. Test 0 dòng vẫn xuất bảng Parquet rỗng đúng schema. Không tự dùng `.env`/credential.
 
+## 5-fold CV và chế độ gán nhãn `topic` (debate 1)
+
+Kết luận và bằng chứng: [debates/1-huong-cai-tien-mo-hinh.md](debates/1-huong-cai-tien-mo-hinh.md). Lệnh `cv` chia 5 fold theo nhóm prompt/text trùng, fit lại cấu hình cố định trên từng fold, không lưu model, không đọc test:
+
+```powershell
+& .\.venv\Scripts\python.exe -m src.baseline cv --train .\train.csv --config .\configs\baseline.json --output-dir .\outputs\cv_run2
+```
+
+`cv_metrics.json` ghi từng fold (overlap, lớp thiếu, metrics, recall từng lớp) và trung bình ± độ lệch. Lượt 19/11/2026 (`outputs/cv_run1`): balanced accuracy argmax **0,2997 ± 0,0095**; `topic` **0,4182** trên fold cân bằng.
+
+`predict --assignment topic` gom các đoạn test theo chủ đề rồi gán mỗi cụm các nhãn khác nhau (Hungarian). **Mặc định vẫn là `argmax`** ở CLI và notebook, vì Kaggle ghi số đoạn mỗi model trong test không bằng nhau; mô phỏng lệch tỷ lệ chỉ còn tăng +0,026–0,036 và có lượt giảm điểm. Rules chỉ cấm gán nhãn thủ công, nhưng không có xác nhận rõ từ BTC; bật `topic` là quyết định của bạn. Với ít hơn 18 dòng test, `topic` trả đúng argmax.
+
+Notebook mới: `notebooks/kaggle_cpu_standalone_v2.ipynb` (build bằng `scripts/build_kaggle_cpu_notebook.py --output notebooks/kaggle_cpu_standalone_v2.ipynb`), có biến `ASSIGNMENT = 'argmax'` trong cell chạy. Notebook v1 giữ nguyên.
+
 ## File và artifact
 
 | Đường dẫn | Vai trò |
@@ -89,7 +105,7 @@ New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
 & .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Chín test kiểm tra schema, ID, null, thiếu lớp, nối nhóm prompt/duplicate, vocabulary không học từ validation, optimizer chưa học và Parquet nhỏ/rỗng. Không dùng fixture để công bố điểm thi.
+Mười ba test kiểm tra schema, ID, null, thiếu lớp, nối nhóm prompt/duplicate, vocabulary không học từ validation, optimizer chưa học và Parquet nhỏ/rỗng. Không dùng fixture để công bố điểm thi.
 
 ## Đưa tài nguyên vào Kaggle
 
