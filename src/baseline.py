@@ -26,7 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              classification_report, confusion_matrix, f1_score)
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import FeatureUnion, Pipeline
 from threadpoolctl import threadpool_limits
 
 # Official Overview > Evaluation > Valid Labels, verified 2026-10-26.
@@ -177,12 +177,25 @@ def make_split(frame, config):
     return train_idx, valid_idx, groups, audit
 
 
+def _tfidf(params):
+    params = dict(params)
+    params['ngram_range'] = tuple(params['ngram_range'])  # JSON lists are rejected by sklearn
+    return TfidfVectorizer(**params, dtype=np.float32)  # float32 on every branch, or hstack upcasts
+
+
 def build_pipeline(config):
-    tfidf = dict(config['tfidf'])
-    tfidf['ngram_range'] = tuple(tfidf['ngram_range'])
-    return Pipeline([('tfidf', TfidfVectorizer(**tfidf, dtype=np.float32)),
+    features = _tfidf(config['tfidf'])
+    if 'word_tfidf' in config:  # optional word branch (debates/2-them-word-tfidf.md)
+        features = FeatureUnion([('char', features), ('word', _tfidf(config['word_tfidf']))])
+    return Pipeline([('tfidf', features),
                      ('classifier', LogisticRegression(**config['logistic_regression'],
                                                        random_state=config['seed']))])
+
+
+def feature_counts(model):
+    step = model.named_steps['tfidf']
+    branches = step.transformer_list if isinstance(step, FeatureUnion) else [('char', step)]
+    return {name: len(vectorizer.vocabulary_) for name, vectorizer in branches}
 
 
 def fit_checked(model, texts, labels):
@@ -316,8 +329,10 @@ def train(args):
     save_json(artifact / 'config.json', config)
     meta = {'created_utc': datetime.now(timezone.utc).isoformat(), 'environment': environment(),
             'input': input_audit, 'config': config, 'split': split_audit, 'metrics': metrics,
-            'validation_feature_count': len(model.named_steps['tfidf'].vocabulary_),
-            'full_feature_count': len(full.named_steps['tfidf'].vocabulary_),
+            'validation_feature_count': sum(feature_counts(model).values()),
+            'full_feature_count': sum(feature_counts(full).values()),
+            'validation_feature_counts': feature_counts(model),
+            'full_feature_counts': feature_counts(full),
             'validation_iterations': model.named_steps['classifier'].n_iter_.tolist(),
             'full_iterations': full.named_steps['classifier'].n_iter_.tolist(),
             'timing_seconds': {'validation_fit': fit_seconds, 'full_fit': full_seconds,

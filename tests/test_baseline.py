@@ -7,9 +7,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import FeatureUnion
 
-from src.baseline import (LABELS, assign_by_topic, build_pipeline, fit_checked, main, make_split,
-                          read_input, validate_submission)
+from src.baseline import (LABELS, assign_by_topic, build_pipeline, feature_counts, fit_checked, main,
+                          make_split, read_input, validate_submission)
 
 
 class BaselineChecks(unittest.TestCase):
@@ -75,6 +77,25 @@ class BaselineChecks(unittest.TestCase):
         model.predict(['\u03a9\u03a9\u03a9 validation exclusive'])
         self.assertEqual(before, model.named_steps['tfidf'].vocabulary_)
         self.assertNotIn('\u03a9\u03a9\u03a9', before)
+
+    def test_char_word_config_builds_float32_union_with_punctuation_tokens(self):
+        texts = ['Hello , world !', 'Hello world .', 'Hi , there !', 'Hi there .']
+        labels = ['a', 'a', 'b', 'b']
+        config = json.loads(Path('configs/char_word.json').read_text(encoding='utf-8'))
+        model = build_pipeline(config)
+        fit_checked(model, texts, labels)
+        self.assertIsInstance(model.named_steps['tfidf'], FeatureUnion)
+        matrix = model.named_steps['tfidf'].transform(texts)
+        counts = feature_counts(model)
+        self.assertEqual(set(counts), {'char', 'word'})
+        self.assertEqual(matrix.dtype, np.float32)
+        self.assertEqual(matrix.shape[1], sum(counts.values()))
+        self.assertEqual(model.named_steps['classifier'].coef_.shape[1], sum(counts.values()))
+        self.assertIn('!', model.named_steps['tfidf'].transformer_list[1][1].vocabulary_)
+        baseline = build_pipeline(json.loads(Path('configs/baseline.json').read_text(encoding='utf-8')))
+        fit_checked(baseline, texts, labels)
+        self.assertIsInstance(baseline.named_steps['tfidf'], TfidfVectorizer)
+        self.assertEqual(list(feature_counts(baseline)), ['char'])
 
     def test_submission_rejects_reordered_ids_columns_and_bad_label(self):
         test = pd.DataFrame({'id': ['001', '002']})
