@@ -23,7 +23,14 @@ def main():
     # Keep function definitions intact, but do not invoke the CLI on import.
     source = source.rsplit("if __name__ == '__main__':", 1)[0]
     ast.parse(source)
-    config = json.loads((root / 'configs/baseline.json').read_text(encoding='utf-8'))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', default='notebooks/kaggle_cpu_standalone.ipynb',
+                        help='Path relative to repository root; must not exist yet.')
+    parser.add_argument('--config', default='configs/baseline.json',
+                        help='Config embedded in the notebook, relative to repository root.')
+    args = parser.parse_args()
+    config = json.loads((root / args.config).read_text(encoding='utf-8'))
+    features = 'character + word TF-IDF' if 'word_tfidf' in config else 'character TF-IDF'
     run = '''from pathlib import Path
 import tempfile
 import shutil
@@ -66,10 +73,10 @@ print('This run does not submit anything to the competition.')
     ast.parse(run)
     book = {'cells': [
         cell('markdown', 'introduction', '# Name That LLM — CPU TF-IDF baseline\n\n'
-             'Self-contained notebook generated from src/baseline.py and configs/baseline.json. '
+             f'Self-contained notebook generated from src/baseline.py and {args.config}. '
              'CPU only; Internet OFF; attach Name That LLM competition data. '
              'No external datasets, model downloads, paid APIs or automatic submissions.\n\n'
-             'Trains DummyClassifier and character TF-IDF + Logistic Regression on a grouped '
+             f'Trains DummyClassifier and {features} + Logistic Regression on a grouped '
              'holdout, refits on all labeled data, then predicts the current test file. '
              'The public example row count is never hardcoded. Dependencies are supplied by '
              'the Kaggle runtime; training and inference use that same environment.\n'),
@@ -78,10 +85,7 @@ print('This run does not submit anything to the competition.')
                      'language_info': {'name': 'python'},
                      'kaggle': {'isInternetEnabled': False, 'isGpuEnabled': False}},
         'nbformat': 4, 'nbformat_minor': 5}
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', default='notebooks/kaggle_cpu_standalone.ipynb',
-                        help='Path relative to repository root; must not exist yet.')
-    output = root / parser.parse_args().output
+    output = root / args.output
     with output.open('x', encoding='utf-8') as f:
         json.dump(book, f, ensure_ascii=False, indent=1)
     print(output)
